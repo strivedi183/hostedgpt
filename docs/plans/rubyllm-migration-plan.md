@@ -77,7 +77,7 @@ The repo's app-wide config is **`config/options.yml`** (loaded at
 Add under `shared.features:` (after `password_reset_email`, line 48):
 
 ```yaml
-  use_ruby_llm: <%= ENV["USE_RUBY_LLM"] || default_to(false) %>
+  use_ruby_llm: <%= ENV["USE_RUBY_LLM_FEATURE"] || default_to(false) %>
 ```
 
 Flag name is `use_ruby_llm` (snake_case) so `Feature.use_ruby_llm?` dispatches
@@ -114,11 +114,39 @@ the reader at `user.rb:33`) and any `feature` key. If a dogfooder flips
 This is a latent bug in the existing code that directly affects our plan.
 **Phase 1 must fix it** by merging in both write paths:
 
-- `UsersController#update` (`users_controller.rb:29-36`): read
-  `Current.user.preferences`, deep-merge the incoming `user_params[:preferences]`,
-  write the merged hash.
+- `UsersController#update` (`users_controller.rb:29-36`): replace
+  `@user.update(user_params)` with a read-merge-write:
+
+  ```ruby
+  def update
+    incoming = user_params[:preferences]&.to_h&.deep_symbolize_keys || {}
+    @user.preferences = @user.preferences.deep_merge(incoming)
+    if @user.save
+      Current.user.reload
+      redirect_back fallback_location: root_path, status: :see_other
+    else
+      redirect_back fallback_location: root_path, status: :unprocessable_content
+    end
+  end
+  ```
+
+  `user_params` only permits `preferences`, so no other params are affected.
+  `JsonSerializer.dump` converts `"true"`/`"false"` strings to booleans, so
+  param strings land as real booleans.
 - `Settings::PeopleController#update` (`settings/people_controller.rb:7-13`):
-  same merge against `Current.person.user.preferences`.
+  preferences arrive nested under `person[personable_attributes][preferences]`,
+  so merge inside `person_params` before
+  `format_and_strip_all_but_first_valid_credential(h)`:
+
+  ```ruby
+  if (prefs = h.dig("personable_attributes", "preferences")).present? && (user = Current.person.user)
+    h["personable_attributes"]["preferences"] = user.preferences.deep_merge(prefs.deep_symbolize_keys)
+  end
+  ```
+
+  Guard: `Current.person.user` is nil for `Tombstone` personables
+  (delegated_type), so skip the merge there — the flag is meaningless for
+  tombstoned accounts anyway.
 
 This is in-scope as "make the preference field writable" — without it, the
 write is not durable. Frame it as fixing a latent bug, not a feature.
@@ -163,6 +191,22 @@ per-driver, not per-code-path — keeping dispatch in one place
 (`APIService#ai_backend`) avoids the scattered `if Feature.rubyllm?` checks that
 made the `add-rubyllm-with-feature-flag` branch "not meet phased needs."
 
+### Phase 6 default-flip constraint (test-env carve-out)
+
+Flipping the default to `true` in Phase 6 makes the flag true in **all**
+environments, including test — which would reroute the old SDK job tests (they
+dispatch through `APIService#ai_backend` and never stub the flag),
+`api_service_test.rb:43-50`, the existing autotitle test, and the settings
+controller tests through `AIBackend::RubyLLM`, breaking the "do not edit
+through Phase 6" constraint. `default_to(true, except_env_test: false)` does
+**not** work: the `default_to` helper uses `default ||=`, so a falsy
+`except_env_test:` override falls through to the main value. Phase 6 therefore
+uses hand-rolled ERB (see Phase 6), and **all new RubyLLM tests opt in
+explicitly** via `stub_features(use_ruby_llm: true)` (the `OptionsHelpers`
+pattern used by `add-rubyllm-with-feature-flag` `fe2e7ef`'s
+`get_next_ai_message_job_ruby_llm_test.rb`), because the test-env default stays
+`false` forever.
+
 ### Initializer (minimal, dummy keys are intentional)
 
 `config/initializers/ruby_llm.rb` (new):
@@ -181,6 +225,12 @@ The dummy keys are **intentional**: they let RubyLLM boot without env vars.
 Real per-request keys are injected via `RubyLLM.context` inside
 `AIBackend::RubyLLM` — not in the initializer. Do **not** "fix" this by raising
 on missing keys. Reference: `add-in-rubyllm-ai` commit `280b2c5`.
+
+Note: `DEFAULT_GEMINI_KEY` is a new env var that does **not** wire into the
+`default_llm_keys` feature (`api_service.rb:48-53` has no Gemini case) —
+harmless, initializer-only. (Reference commit `280b2c5` wired
+`DEFAULT_GROQ_KEY` into `gemini_api_key`; that was a bug and this plan
+deliberately diverges — do not "reconcile" it back.)
 
 ### Inflection
 
@@ -225,7 +275,11 @@ flipped, because `supports_driver?` is `false` for every driver.
     `client_method_name`, `preceding_conversation_messages`, `stream_handler`,
     `format_parallel_tool_calls`) raise `NotImplementedError`.
 - `test/support/test_client/ruby_llm.rb` — new, shell (class skeleton mirroring
-  `test/support/test_client/open_ai.rb` structure, methods stubbed).
+  `test/support/test_client/open_ai.rb` structure, methods stubbed). Final
+  shape must expose `.context` (yielding a config double that records setter
+  calls) and a nested `TestClient::RubyLLM::Chat` with `with_instructions` /
+  `with_params` / `with_tools` / `add_message` / `complete` / `ask` — per
+  `fe2e7ef`'s `test/support/test_client/ruby_llm.rb`.
 - `app/models/api_service.rb:23` — add the
   `return AIBackend::RubyLLM if ...` line (dead code since
   `supports_driver?` is false).
@@ -248,7 +302,10 @@ flipped, because `supports_driver?` is `false` for every driver.
   classes with flag off.
 - Add a test proving the preferences-merge fix: a user with
   `preferences: {dark_mode: "light", feature: {use_ruby_llm: true}}` who
-  PATCHes `{nav_closed: true}` ends up with all three keys preserved.
+  PATCHes `{nav_closed: true}` ends up with all three keys preserved. (The
+  read-merge-write also persists the `dark_mode: "system"` default injected at
+  read time by `user.rb:33`'s `with_defaults` if it was never explicitly set —
+  harmless; assert against the actual merged hash, not a minimal one.)
 
 **Acceptance:** `bin/rails test` green. `Feature.use_ruby_llm?` returns false by
 default. No production code path can reach `AIBackend::RubyLLM`. Preferences
@@ -278,35 +335,100 @@ Do **not** implement `test_execute` for non-OpenAI providers in this phase.
 - `app/services/ai_backend/ruby_llm.rb` — implement:
   - `initialize` — call `super`, resolve `@api_service`, `@token`,
     `@api_name` from `@assistant.language_model`. Do NOT construct a client
-    (RubyLLM is a module).
+    (RubyLLM is a module). Include the upfront blank-token check the old
+    backends have (`open_ai.rb:43`, `gemini.rb:42`):
+
+    ```ruby
+    super
+    raise ConfigurationError if assistant.api_service.requires_token? && assistant.api_service.effective_token.blank?
+    ```
   - `ruby_llm_context` —
-    `RubyLLM.context { |c| c.openai_api_key = token; c.openai_api_base = url if url != APIService::URL_OPEN_AI }`
+    `self.class.client.context { |c| c.openai_api_key = token; c.openai_api_base = url if url != APIService::URL_OPEN_AI }`
     (handles Groq — same logic as `add-in-rubyllm-ai` `set_provider_base`,
-    commit `bd373e7`).
+    commit `bd373e7`). **Must go through `self.class.client`, not a hardcoded
+    `::RubyLLM`** — in test env `self.class.client` is `TestClient::RubyLLM`;
+    hardcoding `::RubyLLM.context` would build a real chat and hit the network
+    (webmock-blocked). The env-dispatch (vs. the feature-flag branch's Minitest
+    stubbing via `RubyLLMTestHelpers`) is deliberate: it preserves system-test
+    coverage, same rationale as the comment at `open_ai.rb:5-8`.
   - `build_chat` —
-    `ruby_llm_context.chat(model: @api_name, provider: :openai, assume_model_exists: true)`.
-  - `get_oneoff_message(instructions, messages, params)` —
-    `chat.with_instructions(full_instructions).ask(preceding_messages(messages).last[:content], **params)`.
-    Return `response.content`.
-  - `stream_next_conversation_message(&chunk_handler)` —
-    `chat.complete { |chunk| stream_handler.call(chunk, chunk_handler) }`.
+    `self.class.chat_class.new(model: @api_name, provider: :openai, assume_model_exists: true, context: ruby_llm_context)`,
+    with `self.chat_class` = `::RubyLLM::Chat` in prod /
+    `TestClient::RubyLLM::Chat` in test (constructor shape per `fe2e7ef`'s
+    `build_chat`).
+  - `get_oneoff_message(instructions, messages, params = {})` —
+
+    ```ruby
+    chat = build_chat
+    chat.with_instructions(instructions)           # the caller's instructions — NOT full_instructions
+    preceding_messages(messages).each { |msg| chat.add_message(msg) }
+    chat.with_params(**params) if params.present?  # Chat#ask(message, with:) accepts NO params kwarg
+    chat.complete.content
+    ```
+
+    Two traps, both verified against `ruby_llm-1.16.0`:
+    `with_instructions(full_instructions)` would silently replace the autotitle
+    system prompt with assistant persona + memories + clock; and
+    `ask(text, response_format: ...)` raises `ArgumentError: unknown keyword`
+    (`Chat#ask` is `ask(message = nil, with: nil, &)`).
+  - `stream_next_conversation_message(&chunk_handler)` — full override (the
+    base flow at `ai_backend.rb:27-49` is unusable with RubyLLM). Preserve
+    three base-flow behaviors: accumulate `@stream_response_text`, raise
+    `::Faraday::ParsingError` on blank (preserves the job's blank-response
+    rescue at `get_next_ai_message_job.rb:86`), return `nil` on text success
+    (so `get_next_ai_message_job.rb:52` assigns nil):
+
+    ```ruby
+    chat = build_chat
+    chat.with_instructions(full_instructions)
+    preceding_conversation_messages.each { |msg| chat.add_message(msg) }
+    chat.complete { |chunk| stream_handler.call(chunk, chunk_handler) }
+    raise ::Faraday::ParsingError if @stream_response_text.blank?
+    nil
+    ```
+
     Capture `chunk.input_tokens`/`chunk.output_tokens` onto `@message`
     **inside** the stream proc (same timing as `AIBackend::OpenAI#stream_handler`
-    at `open_ai.rb:77-109`), not after the stream completes. Raise
-    `AIBackend::RubyLLM::ConfigurationError` on `RubyLLM::UnauthorizedError`.
-    Raise `Faraday::ParsingError` on blank response (preserves the job's
-    existing blank-response rescue at `get_next_ai_message_job.rb:86`).
+    at `open_ai.rb:77-109`), not after the stream completes.
   - `stream_handler` — proc yielding `chunk.content` to `chunk_handler`,
-    accumulating `@stream_response_text`. Rescue
-    `RubyLLM::UnauthorizedError` → `ConfigurationError`,
-    `RubyLLM::RateLimitError`/`PaymentRequiredError` → `RateLimitError`.
-    Re-raise `GetNextAIMessageJob::ResponseCancelled` (cooperative cancellation —
-    matches `AIBackend::OpenAI#stream_handler` at `open_ai.rb:77-109`).
+    accumulating `@stream_response_text`. Rescue order: re-raise
+    `GetNextAIMessageJob::ResponseCancelled` first (cooperative cancellation —
+    matches `AIBackend::OpenAI#stream_handler` at `open_ai.rb:77-109`), then
+    the mapped error lists below, then a catch-all that logs and swallows
+    (parity with `open_ai.rb:105-108`; `fe2e7ef` does the same).
+  - Error mapping — use the feature-flag branch's broad lists, not a two-error
+    subset. A blank token raises `::RubyLLM::ConfigurationError` from
+    `ensure_configured!` at provider construction (verified at `provider.rb:261`
+    in the gem), not `UnauthorizedError`:
+
+    ```ruby
+    CONFIGURATION_ERRORS = [
+      ::RubyLLM::UnauthorizedError, ::RubyLLM::ConfigurationError,
+      ::RubyLLM::BadRequestError, ::RubyLLM::ForbiddenError,
+      ::RubyLLM::ContextLengthExceededError,
+    ].freeze
+    RATE_LIMIT_ERRORS = [
+      ::RubyLLM::RateLimitError, ::RubyLLM::PaymentRequiredError,
+      ::RubyLLM::OverloadedError, ::RubyLLM::ServiceUnavailableError,
+    ].freeze
+    # rescue *CONFIGURATION_ERRORS => raise ConfigurationError, e.message
+    # rescue *RATE_LIMIT_ERRORS    => raise RateLimitError, e.message
+    ```
+
+    Namespacing trap (leave a code comment): inside `AIBackend::RubyLLM`, bare
+    `ConfigurationError` resolves to `AIBackend::RubyLLM::ConfigurationError` —
+    the rescue lists must spell `::RubyLLM::ConfigurationError`. Use the
+    `::RubyLLM` prefix for all gem references (matches `fe2e7ef`).
   - `preceding_conversation_messages` — for Phase 2, handle **text-only**
     messages (skip images/PDFs). Reuse the message-iteration shape from
     `AIBackend::OpenAI#preceding_conversation_messages` (`open_ai.rb:118-170`)
     but emit `RubyLLM::Message` / `{role:, content:}` hashes. Strip tool-call
-    fields (not supported yet).
+    fields (not supported yet) — concretely: **skip `message.tool?` messages
+    entirely** and emit assistant messages as plain text without
+    `content_tool_calls`. Emitting `role: :tool` without `tool_call_id`
+    produces invalid provider payloads (Anthropic 400s), so a half-measure
+    (keeping the tool role) is worse than skipping. Phase 5 replaces this with
+    proper `RubyLLM::ToolCall` reconstruction.
   - `self.supports_driver?` → `["openai"].include?(driver)`.
   - `self.test_execute(url, token, api_name)` — minimal OpenAI-only test-execute
     for `APIService.test_language_model` (`api_service.rb`), mirroring
@@ -332,6 +454,20 @@ correctly with token counts and throttle parity (0.1s,
 `get_next_ai_message_job.rb:41`). With flag OFF, `AIBackend::OpenAI` is used
 (byte-identical). With flag ON and driver `anthropic`/`gemini`, old path is used
 (via `supports_driver?` guard).
+
+Known limitation (documented here so it isn't filed as a Phase 5 regression):
+with the flag on before Phase 5, `supports_tools?` assistants silently get no
+tools registered — Memory/Image/OpenMeteo won't run.
+
+**Parity note (deliberate behavior change):** the old backends cap output
+(`max_completion_tokens: 2000` at `open_ai.rb:69`, `max_tokens: 2000` at
+`anthropic.rb:135`); the RubyLLM path sends no cap for OpenAI, and RubyLLM
+defaults Anthropic to `model.max_tokens || 4096` (4096 under
+`assume_model_exists`). Responses can be longer/more expensive than flag-off.
+Accepted: the 2000 caps were acknowledged tech debt (`open_ai.rb:69` comment).
+If strict parity is ever needed: per-driver
+`chat.with_params(driver == "anthropic" ? { max_tokens: 2000 } : { max_completion_tokens: 2000 })`
+in `build_chat`.
 
 **Reference code:** `add-in-rubyllm-ai` `app/services/ai_backend.rb`
 `build_chat`/`set_provider_key`/`set_provider_base` (commits `bd373e7`,
@@ -389,12 +525,15 @@ behavior. Images via active-storage URLs/base64; PDFs via text extraction (the
 existing pattern — `pdf-reader`, no native PDF upload).
 
 **Default and fallback:** Prefer `RubyLLM::Content.new(text, attachments)` (from
-`add-in-rubyllm-ai` `bd373e7`) — it abstracts provider differences. Fall back to
-the feature-flag branch's `build_image_content` per-provider switch
-(`ruby_llm.rb`) only if a bounded spike shows `RubyLLM::Content` mishandles a
-provider. The spike is: one test per driver confirming an image attachment
-streams a vision response. If all three pass, use `RubyLLM::Content` and skip
-the per-provider switch entirely.
+`add-in-rubyllm-ai` **`7fdc00b`**, `ai_backend.rb:193`) — it abstracts provider
+differences, and `RubyLLM::Attachment` handles `ActiveStorage::Attached::One`
+natively (verified in 1.16.0), so passing `document.file` works. Fall back to
+the per-provider content-part switch — `bd373e7`'s `RubyLLM::Content::Raw` +
+`build_image_content`, also present in the feature-flag branch's `ruby_llm.rb` —
+only if a bounded spike shows `RubyLLM::Content` mishandles a provider. The
+spike is: one test per driver confirming an image attachment streams a vision
+response. If all three pass, use `RubyLLM::Content` and skip the per-provider
+switch entirely.
 
 **Files:**
 
@@ -424,9 +563,10 @@ text. Parity with old backends verified by running the same conversation under
 flag-off and flag-on.
 
 **Reference code:** `add-in-rubyllm-ai` `RubyLLM::Content.new(text, attachments)`
-(commit `bd373e7`); feature-flag branch `build_image_content`/
-`build_multimodal_content` as fallback; `sanitize_content` from
-`add-in-rubyllm-ai`. Take ONLY the named methods.
+(commit `7fdc00b`); `bd373e7`'s `Content::Raw` + `build_image_content` and the
+feature-flag branch's `build_image_content`/`build_multimodal_content` as
+fallback; `sanitize_content` from `add-in-rubyllm-ai` `bd373e7`. Take ONLY the
+named methods.
 
 **Note:** `Toolbox::Image` (image *generation*) is NOT touched in this phase —
 it still uses the raw `OpenAI::Client` path (`toolbox/image.rb:38-49`). This
@@ -463,39 +603,58 @@ inside `app/services/ai_backend/ruby_llm.rb` or a new
   ```ruby
   class AIBackend::RubyLLM::ToolCallIntercepted < StandardError; end
 
-  class AIBackend::RubyLLM::InterceptedTool < RubyLLM::Tool
+  class AIBackend::RubyLLM::InterceptedTool < ::RubyLLM::Tool
     def initialize(name:, description:, params_schema:)
       @tool_name = name
       @tool_description = description
-      @params_schema = params_schema
+      @params_schema = params_schema # Tool#params_schema returns this ivar when defined (verified 1.16.0)
     end
+
+    def name = @tool_name           # required: base class derives name from class name otherwise
+    def description = @tool_description
+
     def execute(**)
       raise AIBackend::RubyLLM::ToolCallIntercepted
     end
   end
   ```
 
+  The `name`/`description` overrides are **not optional**: without them
+  `RubyLLM::Tool#name` derives from the class name
+  (`"AIBackend::RubyLLM::InterceptedTool"` → `"ai_backend--ruby_llm--intercepted"`)
+  and `Chat#with_tool` registers tools keyed by `name.to_sym`, collapsing every
+  tool into a single garbage entry. (`@params_schema` needs no override —
+  `Tool#params_schema` returns the ivar if defined.)
+
   Pattern from `add-in-rubyllm-ai` `bd373e7` — raises from `execute` (public
   API), NOT by overriding `handle_tool_calls` (private, fragile). Take ONLY
   this class, not the rest of `bd373e7`.
 
-- `test/services/ai_backend/ruby_llm/tool_interception_test.rb` — new, asserts:
-  1. `response.tool_calls` is populated after `chat.complete` with an
-     `InterceptedTool` registered.
-  2. `InterceptedTool#execute` is never called (RubyLLM halts before executing).
-  3. The chat does not auto-continue the conversation after a tool-call
-     response.
+- `test/services/ai_backend/ruby_llm/tool_interception_test.rb` — new. Under
+  the raise-from-`execute` pattern, `complete` raises and `execute` **is**
+  called — so the assertions are (verified against `ruby_llm-1.16.0`:
+  `Chat#complete_once` calls `add_message response` **before**
+  `handle_tool_calls`, and `tool_concurrency` defaults to `false`, so
+  sequential execution propagates the raise cleanly):
+
+  1. `chat.complete` raises `AIBackend::RubyLLM::ToolCallIntercepted` when the
+     model requests a tool.
+  2. After the raise, `chat.messages.last.tool_calls` is populated with every
+     requested call (id, name, arguments — including parallel calls).
+  3. No `role: :tool` message is appended and the chat does not auto-continue
+     after a tool-call response.
 
   Uses `TestClient::RubyLLM` with `function` stubbed. If the test fails against
   `~> 1.16.0`, the spike switches to the `InterceptedChat#handle_tool_calls`
   override (from `add-rubyllm-with-feature-flag` `fe2e7ef`,
-  `app/services/ai_backend/ruby_llm/intercepted_chat.rb`) and documents the
-  private-API coupling in the test file.
+  `app/services/ai_backend/ruby_llm/intercepted_chat.rb`) and asserts instead:
+  `complete` returns normally, `response.tool_calls` is populated, `execute` is
+  never called. Document the private-API coupling in the test file.
 
 **Acceptance:** The three assertions pass (or, if they fail, the
-`InterceptedChat` fallback is adopted and the test is updated to assert the same
-three properties via that path). Phase 5 can then proceed against a known-good
-interception pattern.
+`InterceptedChat` fallback is adopted and the test is updated to assert the
+equivalent properties via that path). Phase 5 can then proceed against a
+known-good interception pattern.
 
 ---
 
@@ -516,18 +675,30 @@ execution, RubyLLM must NOT auto-execute.
     The descriptors are already in the right shape —
     `tool.dig(:function, :name)`, `:description`, `:parameters`. Do not re-derive
     the schema. Reference: feature-flag branch `tool_instances`.
-  - `stream_next_conversation_message` — **override this method on
-    `AIBackend::RubyLLM`** (like `AIBackend::Gemini` does at `gemini.rb:86-109`)
-    so the base flow at `ai_backend.rb:27-49` is not used. The base flow calls
-    `format_parallel_tool_calls(@stream_response_tool_calls)` at `ai_backend.rb:45`,
-    and the `AIBackend::Tools` concern declares it with `raise NotImplementedError`
-    at `ai_backend/tools.rb:46` — overriding the method sidesteps that path.
-    Register tools via `chat.with_tool(*tool_instances)` only if
-    `@assistant.language_model.supports_tools?`. Catch `ToolCallIntercepted` (or
-    inspect `response.tool_calls`) and format tool calls into the existing
-    canonical OpenAI shape
-    `{index:, type:"function", id:, function:{name:, arguments: JSON}}` via a
-    `format_tool_calls` helper. Return the array so the job's existing
+  - `stream_next_conversation_message` — already a full override since Phase 2
+    (the base flow at `ai_backend.rb:27-49` is unusable with RubyLLM; the base
+    flow calls `format_parallel_tool_calls(@stream_response_tool_calls)` at
+    `ai_backend.rb:45`, which the `AIBackend::Tools` concern declares with
+    `raise NotImplementedError` at `ai_backend/tools.rb:46`). In this phase,
+    register tools via `chat.with_tools(*tool_instances)` (note: `with_tools`,
+    plural — `with_tool` takes a single tool and splatting into it mis-binds)
+    only if `@assistant.language_model.supports_tools?`. Rescue
+    `ToolCallIntercepted`, then read `chat.messages.last&.tool_calls` — the
+    response object is never assigned because `complete` raised; the assistant
+    tool-call message is already appended to `chat.messages` before RubyLLM
+    executes tools (verified in 1.16.0). Format into the existing canonical
+    OpenAI shape via (from `bd373e7`):
+
+    ```ruby
+    def format_tool_calls(tool_calls)
+      tool_calls.values.map.with_index do |tc, i|
+        { index: i, type: "function", id: tc.id,
+          function: { name: tc.name, arguments: tc.arguments.to_json } }
+      end
+    end
+    ```
+
+    Return the array so the job's existing
     `@message.content_tool_calls = tool_calls` path
     (`get_next_ai_message_job.rb:52`) works unchanged.
   - `format_parallel_tool_calls` — **still implement** as a defensive identity
@@ -535,7 +706,10 @@ execution, RubyLLM must NOT auto-execute.
     satisfied even though the overridden `stream_next_conversation_message`
     doesn't call it. RubyLLM returns tool calls already separated, so this is
     mostly identity (no malformed-`call_`-id splitting needed, unlike
-    `AIBackend::OpenAI::Tools` at `open_ai/tools.rb:7-29`).
+    `AIBackend::OpenAI::Tools` at `open_ai/tools.rb:7-29`). Also define
+    `parallel_tool_calls` (the concern's second abstract method,
+    `ai_backend/tools.rb:50-52`) as an identity, so the contract is fully
+    satisfied.
   - `preceding_conversation_messages` — replay prior tool messages: convert
     stored `content_tool_calls` (OpenAI shape, serialized via `JsonSerializer`
     at `message/toolable.rb:7`) into `RubyLLM::ToolCall.new(id:, name:, arguments:)`
@@ -565,13 +739,25 @@ execution, RubyLLM must NOT auto-execute.
   These sit alongside the existing SDK-specific rescues
   (`get_next_ai_message_job.rb:67-97`), which still serve the old path.
 
+- `app/jobs/get_next_ai_message_job.rb` `set_billing_error` (lines 173-187) —
+  `ai_backend.to_s.split("::").second` will be `"RubyLLM"`, hitting the `else`
+  (OpenAI billing URL) for every provider. Add the `when "RubyLLM"` branch +
+  `provider_billing_url(driver)` helper from `fe2e7ef`, dispatching on
+  `@assistant.language_model.api_service.driver` so Anthropic/Gemini users get
+  the right billing URL.
+
 - `app/jobs/autotitle_conversation_job.rb` — the
   `elsif ai_backend.class == AIBackend::RubyLLM` branch goes at line 43
   (replacing the bare `else`), with the `else` moved after it. It calls
-  `get_oneoff_message` with `response_format: { type: "json_object" }` and a
-  `JSON::ParserError` regex fallback. Do NOT modify the existing
-  OpenAI/Anthropic/Gemini branches at lines 27-42. Reference: feature-flag
-  branch `fe2e7ef`.
+  `get_oneoff_message(system_message, [text])` with **no params**, then
+  `JSON.parse(response)["topic"]` with a `JSON::ParserError` regex fallback —
+  exactly `fe2e7ef`'s branch. Do NOT pass
+  `response_format: { type: "json_object" }`: `with_params` deep-merges into
+  the raw provider payload, and Anthropic's API 400s on an unknown top-level
+  `response_format` field. (`chat.with_schema(...)` is the RubyLLM-native
+  alternative if JSON mode proves flaky; out of scope unless needed.) Do NOT
+  modify the existing OpenAI/Anthropic/Gemini branches at lines 27-42.
+  Reference: feature-flag branch `fe2e7ef`.
 
 **Tests:**
 
@@ -599,34 +785,66 @@ classes/methods, not the surrounding deletions.
 
 ## Phase 6 — Dogfood, then flip default (PR 6)
 
-**Scope:** Flip `use_ruby_llm` default to `true` in `config/options.yml`. Old
-path still reachable via `Feature.use_ruby_llm? = false` (per-user preference or
-env `USE_RUBY_LLM=false`). Optional: migrate `Toolbox::Image` from raw
-`OpenAI::Client` to `RubyLLM.context.paint`.
+**Scope:** Flip `use_ruby_llm` default to `true` in `config/options.yml` —
+**except in the test environment**, per the spine's Phase 6 default-flip
+constraint. Old path still reachable via per-user preference
+`feature: { use_ruby_llm: false }` or env `USE_RUBY_LLM_FEATURE=false`.
+Optional: migrate `Toolbox::Image` from raw `OpenAI::Client` to a keyed
+`RubyLLM.context.paint`.
 
 **Files:**
 
 - `config/options.yml` —
-  `use_ruby_llm: <%= ENV["USE_RUBY_LLM"] || default_to(true) %>`.
+
+  ```yaml
+  # Hand-rolled ERB: default_to can't express a falsy except_env_test override
+  # (it uses ||=), and the old SDK test suite must keep dispatching to the old
+  # backends (uneditable through Phase 6).
+  use_ruby_llm: <%= ENV["USE_RUBY_LLM_FEATURE"] || (Rails.env.test? ? "false" : "true") %>
+  ```
 - `app/services/toolbox/image.rb` — **optional, this phase** — replace
-  `generate_with_openai_client` with `generate_with_rubyllm` using
-  `RubyLLM.context.paint(model: "gpt-image-1", provider: :openai, ...)`. Keep
-  `openai_client` method until Phase 7. Gate via `Feature.use_ruby_llm?` so old
-  path is reachable when flag off. Reference: both branches did this —
-  `add-in-rubyllm-ai` `bd373e7`, feature-flag `fe2e7ef`. Note: image gen still
-  routes through OpenAI even when the chat backend is Anthropic/Gemini — same
-  as the existing `generate_with_openai_client` path it sits next to.
+  `generate_with_openai_client` with `generate_with_rubyllm`. The context must
+  inject the user's key — a bare `RubyLLM.context.paint(...)` would use the
+  dummy global key. Pattern from `fe2e7ef` (including its Groq fix —
+  `find_by(name: "OpenAI")` avoids picking up Groq, also `driver: :openai`):
+
+  ```ruby
+  openai_service = Current.user.api_services.find_by(name: "OpenAI", driver: :openai)
+  # ... same nil/blank-token guard as generate_with_openai_client ...
+  context = ::RubyLLM.context { |c| c.openai_api_key = openai_service.effective_token }
+  image = context.paint(prompt, model: "gpt-image-1", provider: :openai,
+                        assume_model_exists: true, size: "1024x1024")
+  ```
+
+  (`Context#paint` verified in 1.16.0; equivalent to `fe2e7ef`'s
+  `RubyLLM::Image.paint(prompt, ..., context:)`.) Keep `openai_client` method
+  until Phase 7. Gate via `Feature.use_ruby_llm?` so old path is reachable when
+  flag off. Reference: both branches did this — `add-in-rubyllm-ai` `bd373e7`,
+  feature-flag `fe2e7ef`. Note: image gen still routes through OpenAI even when
+  the chat backend is Anthropic/Gemini — same as the existing
+  `generate_with_openai_client` path it sits next to.
 - `app/jobs/get_next_ai_message_job.rb` — no changes (rescues from Phase 5
   already handle RubyLLM errors).
 
 **Tests:**
 
-- Update tests that assert flag-off-as-default to flag-on-as-default.
+- Verify `bin/rails test` stays green with **zero edits to old test files**
+  (the test-env default remains `false`).
+- New RubyLLM tests opt in via `stub_features(use_ruby_llm: true)` — update the
+  Phase 2/5 test specs to include this in `setup` (they were written assuming
+  an env-level default flip).
+- Update only the Phase 1 `feature_test.rb` addition that asserted
+  flag-off-as-default (the options.yml default is now env-dependent: false in
+  test).
+- Add one dispatch test: with the flag stubbed off, `APIService#ai_backend`
+  returns old classes; stubbed on, returns `AIBackend::RubyLLM` — proving the
+  escape hatch post-flip.
 - `test/services/toolbox/image_ruby_llm_test.rb` — if image gen migrated.
 
-**Acceptance:** Default new users and existing users get RubyLLM. Setting
-`USE_RUBY_LLM=false` or per-user preference `feature: { use_ruby_llm: false }`
-reverts to SDK path. No user-visible behavior change.
+**Acceptance:** Default new users and existing users get RubyLLM (test env
+excluded). Setting `USE_RUBY_LLM_FEATURE=false` or per-user preference
+`feature: { use_ruby_llm: false }` reverts to SDK path. No user-visible
+behavior change.
 
 **Dogfood criteria (before merge):** All three providers tested with text,
 images, PDFs, tools, autotitling, cancellation, rate-limit errors,
@@ -660,7 +878,9 @@ production dogfood signal from Phase 6.
 - `app/jobs/get_next_ai_message_job.rb` — remove SDK-specific rescues
   (`OpenAI::ConfigurationError`, `Anthropic::ConfigurationError`,
   `Gemini::Errors::ConfigurationError` monkey-patches at
-  `get_next_ai_message_job.rb:4` and `ai_backend/gemini.rb:3`).
+  `get_next_ai_message_job.rb:4` and `ai_backend/gemini.rb:3`). Collapse
+  `set_billing_error`'s `when "RubyLLM"` branch (added in Phase 5) to the
+  single remaining path.
 - `app/jobs/autotitle_conversation_job.rb:27-50` — collapse to single RubyLLM
   path.
 - `config/options.yml` — remove `use_ruby_llm` flag.
@@ -688,6 +908,16 @@ on production dogfood signal from Phase 6.
 4. **Image-gen migration stays in Phase 6 as optional** — Phase 7 notes
    `ruby-openai` may need to remain if image gen wasn't migrated.
 5. **Plan location:** `docs/plans/rubyllm-migration-plan.md`.
+6. **Env var follows repo convention** — `USE_RUBY_LLM_FEATURE` (all existing
+   flags use the `*_FEATURE` suffix); flag name stays `use_ruby_llm`.
+7. **Phase 6 flip excludes test env** — hand-rolled ERB, because `default_to`
+   can't express a falsy `except_env_test` override and old tests must remain
+   unedited. New RubyLLM tests opt in via `stub_features`.
+8. **Autotitle uses no provider params** — prompt + `JSON.parse` + regex
+   fallback (`fe2e7ef`), because `with_params(response_format:)` would 400 on
+   Anthropic.
+9. **RubyLLM default output-token limits accepted** — no `max_tokens` parity
+   caps (see Phase 2 parity note).
 
 ## Gemfile pin
 
