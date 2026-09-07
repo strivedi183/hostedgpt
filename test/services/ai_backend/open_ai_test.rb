@@ -308,6 +308,15 @@ class AIBackend::OpenAIImageTest < ActiveSupport::TestCase
     assert_not error.message.include?("to use image generation with") # the toolbox owns that context, not the provider layer
   end
 
+  test "generate_image ignores Groq and OpenRouter rows and requires the canonical OpenAI service" do
+    # Groq and OpenRouter services also carry driver :openai; their tokens are
+    # invalid at api.openai.com, so only the canonical URL may satisfy the lookup.
+    api_services(:keith_openai_service).update!(deleted_at: Time.current)
+
+    error = assert_raises(RuntimeError) { AIBackend::OpenAI.generate_image(prompt: "A cartoon cat", user: users(:keith)) }
+    assert_includes error.message, "OpenAI API key not found"
+  end
+
   test "backends without native image generation delegate to OpenAI" do
     AIBackend::OpenAI.stub :generate_image, { b64_json: "DELEGATED", model: "gpt-image-1", provider: "OpenAI" } do
       result = AIBackend::Anthropic.generate_image(prompt: "A cartoon cat", user: users(:keith))

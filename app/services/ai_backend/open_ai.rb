@@ -40,7 +40,9 @@ class AIBackend::OpenAI < AIBackend
   end
 
   def self.generate_image(prompt:, user:)
-    openai_service = user.api_services.find_by(driver: :openai)
+    # Scoped to the canonical OpenAI URL: Groq and OpenRouter services also
+    # carry driver :openai, and their tokens are invalid at api.openai.com.
+    openai_service = user.api_services.find_by(driver: :openai, url: APIService::URL_OPEN_AI)
 
     if openai_service.nil? || openai_service.effective_token.blank?
       # Context-free on purpose: the toolbox that reaches this method knows the
