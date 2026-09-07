@@ -157,14 +157,13 @@ class GetNextAIMessageJob < ApplicationJob
     Current.set(user: @user, message: @message) do
       msgs = ai_backend.get_tool_messages_by_calling(@message.content_tool_calls)
     end
-
     index = @message.index
-    json_of_generated_image = nil
+    generated_image = nil
     msgs.each do |tool_message| # one message for each tool executed
       parsed = JSON.parse(tool_message[:content]) rescue nil
 
       if parsed.is_a?(Hash) && parsed.has_key?("json_of_generated_image")
-        json_of_generated_image = parsed["json_of_generated_image"]
+        generated_image = GeneratedImage.new(parsed["json_of_generated_image"])
         # Redact the large base64 payload from the saved tool message content
         parsed = parsed.except("json_of_generated_image")
       end
@@ -196,25 +195,7 @@ class GetNextAIMessageJob < ApplicationJob
       index: index += 1
     )
 
-    unless json_of_generated_image.nil?
-      binary_image_contents = Base64.decode64(json_of_generated_image)
-
-      tempfile = Tempfile.new(["generated", ".png"])
-      tempfile.binmode
-      tempfile.write(binary_image_contents)
-      tempfile.rewind
-
-      document = Document.new(message: assistant_reply,assistant: @assistant, user: @user, purpose: :assistants_output)
-      document.file.attach(
-        io: tempfile,
-        filename: "generated.png",
-        content_type: "image/png"
-      )
-      assistant_reply.documents << document
-
-      tempfile.close
-      tempfile.unlink
-    end
+    generated_image&.attach_to!(assistant_reply)
 
     GetNextAIMessageJob.perform_later(
       @user.id,
