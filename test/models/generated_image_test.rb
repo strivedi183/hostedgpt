@@ -22,9 +22,10 @@ class GeneratedImageTest < ActiveSupport::TestCase
     assert document.has_image?
   end
 
-  test "attach_to! skips a nil payload without touching the message" do
+  test "attach_to! skips blank or nil payloads without touching the message" do
     assert_no_difference -> { @message.documents.count } do
       GeneratedImage.new(nil).attach_to!(@message)
+      GeneratedImage.new("").attach_to!(@message)
     end
   end
 

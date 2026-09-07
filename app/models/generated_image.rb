@@ -8,7 +8,7 @@ class GeneratedImage
   end
 
   def attach_to!(message)
-    return if @base64_data.nil?
+    return if @base64_data.blank?
 
     tempfile = Tempfile.new(["generated", ".png"])
     tempfile.binmode
@@ -18,8 +18,8 @@ class GeneratedImage
     document = Document.new(message: message, assistant: message.assistant, user: message.user, purpose: :assistants_output)
     document.file.attach(io: tempfile, filename: "generated.png", content_type: "image/png")
     message.documents << document
-
-    tempfile.close
-    tempfile.unlink
+  ensure
+    tempfile&.close
+    tempfile&.unlink
   end
 end
