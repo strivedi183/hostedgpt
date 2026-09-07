@@ -43,8 +43,9 @@ class AIBackend::OpenAI < AIBackend
     openai_service = user.api_services.find_by(driver: :openai)
 
     if openai_service.nil? || openai_service.effective_token.blank?
-      current_backend = Current.message&.assistant&.language_model&.api_service&.name || "current AI backend"
-      raise "OpenAI API key not found. Image generation requires an OpenAI API key. Please configure your OpenAI API key in Settings > API Services to use image generation with #{current_backend}."
+      # Context-free on purpose: the toolbox that reaches this method knows the
+      # current assistant and appends "to use image generation with ..." itself.
+      raise "OpenAI API key not found. Image generation requires an OpenAI API key. Please configure your OpenAI API key in Settings > API Services"
     end
 
     response = client.new(access_token: openai_service.effective_token).images.generate(
@@ -58,7 +59,12 @@ class AIBackend::OpenAI < AIBackend
     )
 
     b64_json = response.dig("data", 0, "b64_json") || response.dig(:data, 0, :b64_json)
-    { b64_json: b64_json, model: IMAGE_MODEL }
+    # The provider label is this implementation's own identity, stated as a
+    # literal: subclasses inherit this method (Groq, OpenRouter), and self in
+    # an inherited class method is the receiver, which would mislabel an
+    # OpenAI-generated image with the vendor's name. A backend that ships
+    # native image generation overrides this method and reports itself.
+    { b64_json: b64_json, model: IMAGE_MODEL, provider: "OpenAI" }
   end
 
   def self.key_error_message

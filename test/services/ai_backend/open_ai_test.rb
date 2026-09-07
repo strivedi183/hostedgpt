@@ -290,6 +290,7 @@ class AIBackend::OpenAIImageTest < ActiveSupport::TestCase
 
     assert_equal "TEST_BASE64_IMAGE_DATA", response[:b64_json]
     assert_equal "gpt-image-1", response[:model]
+    assert_equal "OpenAI", response[:provider]
 
     params = TestClient::OpenAI.images.parameters
     assert_equal "A cartoon cat", params[:prompt]
@@ -299,18 +300,16 @@ class AIBackend::OpenAIImageTest < ActiveSupport::TestCase
     assert_equal "auto", params[:quality]
   end
 
-  test "generate_image raises the preserved message when the user has no OpenAI service" do
+  test "generate_image raises a context-free message when the user has no OpenAI service" do
     users(:keith).api_services.update_all(deleted_at: Time.current) # rubocop:disable Rails/SkipsModelValidations
 
-    Current.set(user: users(:keith), message: messages(:image_generation_tool_call)) do
-      error = assert_raises(RuntimeError) { AIBackend::OpenAI.generate_image(prompt: "A cartoon cat", user: users(:keith)) }
-      expected_backend = messages(:image_generation_tool_call).assistant.language_model.api_service.name
-      assert_equal "OpenAI API key not found. Image generation requires an OpenAI API key. Please configure your OpenAI API key in Settings > API Services to use image generation with #{expected_backend}.", error.message
-    end
+    error = assert_raises(RuntimeError) { AIBackend::OpenAI.generate_image(prompt: "A cartoon cat", user: users(:keith)) }
+    assert_equal "OpenAI API key not found. Image generation requires an OpenAI API key. Please configure your OpenAI API key in Settings > API Services", error.message
+    assert_not error.message.include?("to use image generation with") # the toolbox owns that context, not the provider layer
   end
 
   test "backends without native image generation delegate to OpenAI" do
-    AIBackend::OpenAI.stub :generate_image, { b64_json: "DELEGATED", model: "gpt-image-1" } do
+    AIBackend::OpenAI.stub :generate_image, { b64_json: "DELEGATED", model: "gpt-image-1", provider: "OpenAI" } do
       result = AIBackend::Anthropic.generate_image(prompt: "A cartoon cat", user: users(:keith))
       assert_equal "DELEGATED", result[:b64_json]
     end
