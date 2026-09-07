@@ -54,7 +54,7 @@ class APIServiceTest < ActiveSupport::TestCase
     assert_equal AIBackend::Anthropic, language_models(:claude_best).ai_backend
   end
 
-  test "backends resolve by driver, with Groq picked by the driver and URL pair" do
+  test "backends resolve by provider identity: the driver plus, for openai-dialect vendors, the canonical URL" do
     assert_equal AIBackend::OpenAI, language_models(:gpt_best).ai_backend
     assert_equal AIBackend::Groq, language_models(:llama_3_3_70b_versatile).ai_backend
     assert_equal AIBackend::OpenRouter, language_models(:openrouter_gpt5).ai_backend
@@ -62,6 +62,18 @@ class APIServiceTest < ActiveSupport::TestCase
     assert_equal AIBackend::Anthropic, language_models(:claude_best).ai_backend
     assert_equal AIBackend::Gemini, language_models(:gemini_flash_1_5).ai_backend
   end
+
+  test "provider identities resolve through the canonical URL, not the raw driver" do
+    assert_equal :openai, api_services(:keith_openai_service).provider_identity
+    assert_equal :groq, api_services(:keith_groq_service).provider_identity
+    assert_equal :openrouter, api_services(:keith_openrouter_service).provider_identity
+    assert_equal :anthropic, api_services(:keith_anthropic_service).provider_identity
+    assert_equal :gemini, api_services(:keith_gemini_service).provider_identity
+    assert_nil api_services(:keith_brave_service).provider_identity
+    assert_equal :openai, api_services(:keith_other_service).provider_identity # custom-URL openai-dialect service
+  end
+
+
 
   test "openai-dialect services with custom URLs keep the OpenAI backend" do
     assert_equal AIBackend::OpenAI, language_models(:guanaco).ai_backend
@@ -160,6 +172,20 @@ class APIServiceTest < ActiveSupport::TestCase
 
   test "test_api_service returns a friendly error for drivers without an ai_backend" do
     assert_equal "Error: Testing is not supported for this API service.", api_services(:keith_brave_service).test_api_service
+  end
+
+  test "every chat provider identity maps to an sdk backend" do
+    {
+      openai: [ :openai, APIService::URL_OPEN_AI ],
+      anthropic: [ :anthropic, APIService::URL_ANTHROPIC ],
+      groq: [ :openai, APIService::URL_GROQ ],
+      openrouter: [ :openai, APIService::URL_OPENROUTER ],
+      gemini: [ :gemini, APIService::URL_GEMINI ],
+    }.each do |identity, (driver, url)|
+      service = APIService.new(driver: driver, url: url)
+      assert_equal identity, service.provider_identity
+      assert_not_nil service.sdk_backend, "identity #{identity} must map to a backend"
+    end
   end
 
   private

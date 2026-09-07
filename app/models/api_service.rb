@@ -24,20 +24,67 @@ class APIService < ApplicationRecord
 
   scope :ordered, -> { order(:name) }
 
+  # The per-provider backend registry: one identity -> one backend class that
+  # owns that provider's wire dialect, error copy, and provider policy, whatever
+  # transport (SDK or RubyLLM) ultimately serves the request. A service's
+  # identity collapses the driver plus, for openai-dialect vendors, the
+  # canonical URL into that one key: choices, RubyLLM support, and error facts
+  # all resolve through it, never through the raw driver alone.
+  #
+  # Built as a method (not a class-body constant) so backend autoloading stays
+  # as lazy as the dispatch it replaced. Adding a provider? Add its entry here
+  # and map it in provider_identity. An unmapped driver yields a nil identity
+  # and therefore nil backends, silently.
+  def self.sdk_backends
+    {
+      openai: AIBackend::OpenAI,
+      anthropic: AIBackend::Anthropic,
+      groq: AIBackend::Groq,
+      openrouter: AIBackend::OpenRouter,
+      gemini: AIBackend::Gemini,
+    }
+  end
+
+  def self.chat_provider_identities
+    sdk_backends.keys
+  end
+
+  DIRECT_DRIVERS = %w[openai anthropic gemini].freeze
+
+  def provider_identity
+    return :groq if driver == "openai" && url == URL_GROQ
+    return :openrouter if driver == "openai" && url == URL_OPENROUTER
+    return driver.to_sym if DIRECT_DRIVERS.include?(driver)
+  end
+
+  def sdk_backend
+    self.class.sdk_backends[provider_identity]
+  end
+
+  # Dispatch resolves exactly as the driver-chain it replaces: the RubyLLM
+  # transport serves any driver it supports (which, riding the openai driver,
+  # includes Groq and OpenRouter rows), and everything else falls to the
+  # identity's own backend. Honoring stored choices is the next commit, not
+  # this one.
   def ai_backend
     return AIBackend::RubyLLM if Feature.use_ruby_llm? && AIBackend::RubyLLM.supports_driver?(driver)
 
-    if driver == "openai" && url == URL_GROQ
-      AIBackend::Groq
-    elsif driver == "openai" && url == URL_OPENROUTER
-      AIBackend::OpenRouter
-    elsif driver == "anthropic"
-      AIBackend::Anthropic
-    elsif driver == "gemini"
-      AIBackend::Gemini
-    elsif driver == "openai"
-      AIBackend::OpenAI
-    end
+    sdk_backend
+  end
+
+  # Error facts resolve through the identity's own backend class, so a Groq
+  # or OpenRouter conversation served by RubyLLM still speaks Groq's or
+  # OpenRouter's copy and billing URL, never the generic ones.
+  def key_error_message
+    sdk_backend&.key_error_message || AIBackend.key_error_message
+  end
+
+  def billing_url
+    sdk_backend&.billing_url
+  end
+
+  def provider_name
+    sdk_backend&.name&.demodulize || "AI"
   end
 
   def requires_token?
@@ -59,8 +106,9 @@ class APIService < ApplicationRecord
   end
 
   def test_api_service(url = nil, token = nil)
-    return "Error: Testing is not supported for this API service." if ai_backend.nil?
-    ai_backend.test_api_service(self, url, token)
+    backend = ai_backend
+    return "Error: Testing is not supported for this API service." if backend.nil?
+    backend.test_api_service(self, url, token)
   end
 
   private
