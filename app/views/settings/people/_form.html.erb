@@ -139,16 +139,16 @@
             <span class="w-28 dark:text-gray-400"><%= display_name %></span>
             <span class="w-32">
               <%= radio_button_tag "person[backend_choices][#{choice}]", "", current_choice.blank?,
-                    aria: { label: t("app.settings.people.form.backend_choice_aria_default", driver: display_name) } %>
+                    aria: { label: t("app.settings.people.form.backend_choice_aria_default", provider: display_name) } %>
             </span>
             <span class="w-32">
               <%= radio_button_tag "person[backend_choices][#{choice}]", "ruby_llm", current_choice == "ruby_llm",
                     disabled: !User::Features.ruby_llm_available?(backend),
-                    aria: { label: t("app.settings.people.form.backend_choice_aria_ruby_llm", driver: display_name) } %>
+                    aria: { label: t("app.settings.people.form.backend_choice_aria_ruby_llm", provider: display_name) } %>
             </span>
             <span class="w-32">
               <%= radio_button_tag "person[backend_choices][#{choice}]", "sdk", current_choice == "sdk",
-                    aria: { label: t("app.settings.people.form.backend_choice_aria_sdk", driver: display_name) } %>
+                    aria: { label: t("app.settings.people.form.backend_choice_aria_sdk", provider: display_name) } %>
             </span>
           </div>
         <% end %>
