@@ -15,8 +15,12 @@ class AIBackend::RubyLLM < AIBackend
     ::RubyLLM::OverloadedError, ::RubyLLM::ServiceUnavailableError,
   ].freeze
 
-  def self.supports_driver?(driver)
-    ["openai", "anthropic", "gemini"].include?(driver)
+  # RubyLLM serves every chat provider identity: OpenAI, Anthropic, and Gemini
+  # natively; Groq and OpenRouter through their endpoints (Groq via the
+  # openai-compatible path, OpenRouter via its native provider). Accepts
+  # symbols or strings; callers pass both.
+  def self.supports_identity?(identity)
+    identity.present? && APIService.chat_provider_identities.include?(identity.to_sym)
   end
 
   def self.client
@@ -237,7 +241,10 @@ class AIBackend::RubyLLM < AIBackend
   end
 
   def tools_enabled?
-    @assistant.language_model.supports_tools? && @api_service.url != APIService::URL_GROQ
+    # The provider's tool policy is a provider fact, not a transport one:
+    # LanguageModel#supports_tools? already consults the identity's backend,
+    # so Groq's pinned denial holds no matter which transport serves the call.
+    @assistant.language_model.supports_tools?
   end
 
   def tool_instances

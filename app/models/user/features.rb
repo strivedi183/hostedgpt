@@ -1,20 +1,23 @@
 class User::Features
-  # OpenRouter rides the openai driver, so it needs its own name here. Groq
-  # rides it too but stays out until RubyLLM support is verified.
+  # The transport opinions a backend choice can hold; "" (blank) means
+  # "inherit the site default".
+  BACKEND_CHOICES = %w[ruby_llm sdk].freeze
+
+  # One row per chat provider identity (see APIService.chat_provider_identities):
+  # brave has no chat backend, and Groq and OpenRouter get their own names
+  # because they ride the openai driver.
   def self.derived_backend_names
-    APIService.drivers.keys
-      .select { |driver| APIService.new(driver: driver).ai_backend }
-      .map { |driver| :"#{driver}_ai_backend" } + [:openrouter_ai_backend]
+    APIService.chat_provider_identities.map { |identity| :"#{identity}_ai_backend" }
   end
 
   def self.valid_names
     derived_backend_names + [:use_ruby_llm]
   end
 
-  def self.ruby_llm_available?(backend)
+  def self.ruby_llm_available?(identity)
     defined?(AIBackend::RubyLLM) &&
-      AIBackend::RubyLLM.respond_to?(:supports_driver?) &&
-      AIBackend::RubyLLM.supports_driver?(backend)
+      AIBackend::RubyLLM.respond_to?(:supports_identity?) &&
+      AIBackend::RubyLLM.supports_identity?(identity)
   end
 
   def initialize(user)

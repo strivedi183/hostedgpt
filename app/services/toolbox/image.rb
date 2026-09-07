@@ -5,8 +5,10 @@ class Toolbox::Image < Toolbox
   S
 
   def generate_an_image(image_generation_prompt_s:)
+    # Image generation is provider policy, not transport: the identity's
+    # backend answers, whichever implementation handles chat.
     api_service = Current.message&.assistant&.language_model&.api_service
-    result = generate_with_error_context(api_service&.ai_backend || AIBackend, api_service, image_generation_prompt_s)
+    result = generate_with_error_context(api_service&.sdk_backend || AIBackend, api_service, image_generation_prompt_s)
 
     {
       prompt_given: image_generation_prompt_s,

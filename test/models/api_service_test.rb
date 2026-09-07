@@ -73,7 +73,41 @@ class APIServiceTest < ActiveSupport::TestCase
     assert_equal :openai, api_services(:keith_other_service).provider_identity # custom-URL openai-dialect service
   end
 
+  test "error facts resolve through the identity's own backend, whatever transport serves the request" do
+    groq = api_services(:keith_groq_service)
+    openrouter = api_services(:keith_openrouter_service)
 
+    assert_equal AIBackend::Groq.key_error_message, groq.key_error_message
+    assert_equal "https://console.groq.com/keys", groq.billing_url
+    assert_equal "Groq", groq.provider_name
+    assert_equal AIBackend::OpenRouter.key_error_message, openrouter.key_error_message
+    assert_equal "https://openrouter.ai/credits", openrouter.billing_url
+
+    stub_features(use_ruby_llm: true) do
+      # RubyLLM is dispatched, but the facts still speak Groq and OpenRouter.
+      assert_equal AIBackend::RubyLLM, groq.ai_backend
+      assert_equal AIBackend::Groq.key_error_message, groq.key_error_message
+      assert_equal "https://console.groq.com/keys", groq.billing_url
+      assert_equal "Groq", groq.provider_name
+      assert_equal AIBackend::OpenRouter.billing_url, openrouter.reload.billing_url
+    end
+  end
+
+  test "an explicit choice overrides the site default at dispatch, per identity" do
+    user = api_services(:keith_openai_service).user
+
+    stub_features(use_ruby_llm: false) do
+      user.features[:openai_ai_backend] = "ruby_llm"
+      assert_equal AIBackend::RubyLLM, api_services(:keith_openai_service).reload.ai_backend
+      assert_equal AIBackend::Anthropic, api_services(:keith_anthropic_service).ai_backend
+    end
+
+    stub_features(use_ruby_llm: true) do
+      user.features[:openai_ai_backend] = "sdk"
+      assert_equal AIBackend::OpenAI, api_services(:keith_openai_service).reload.ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_anthropic_service).ai_backend
+    end
+  end
 
   test "openai-dialect services with custom URLs keep the OpenAI backend" do
     assert_equal AIBackend::OpenAI, language_models(:guanaco).ai_backend

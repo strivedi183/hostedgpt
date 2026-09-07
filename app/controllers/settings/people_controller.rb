@@ -35,8 +35,21 @@ class Settings::PeopleController < Settings::ApplicationController
                    .dig(:person, :backend_choices)
     return if choices.blank?
 
+    updates = {}
+    choices.each do |name, value|
+      value = value.presence
+      next if value.present? && !value.in?(User::Features::BACKEND_CHOICES) # the tri-state is enforced server-side, not just by the radios
+
+      updates[name.to_sym] = value
+    end
+    return if updates.empty?
+
+    # One save for all choices: each []= write is a full model save, and five
+    # of those per form submit is five chances to interleave with concurrent
+    # preference writes.
     user = Current.person.reload.user   # merge against fresh state, not a stale session copy
-    choices.each { |name, value| user.features[name.to_sym] = value.presence }
+    feature = user.preferences[:feature] || user.preferences["feature"] || {}
+    user.update!(preferences: user.preferences.deep_merge(feature: feature.merge(updates.transform_keys(&:to_sym))))
   end
 
   def check_personable_id

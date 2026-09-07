@@ -9,7 +9,11 @@ class GetNextAIMessageJob < ApplicationJob
   retry_on WaitForPrevious, wait: ->(run) { (2**run - 1).seconds }, attempts: 3
 
   def ai_backend
-    @assistant.language_model.ai_backend
+    @ai_backend ||= @assistant.language_model.ai_backend
+  end
+
+  def api_service
+    @api_service ||= @assistant.language_model.api_service
   end
 
   def perform(user_id, message_id, assistant_id, attempt = 1)
@@ -63,7 +67,10 @@ class GetNextAIMessageJob < ApplicationJob
     wrap_up_the_message
     return true
   rescue AIBackend::ConfigurationError
-    @message.content_text = ai_backend.key_error_message
+    # Facts come from the service's identity backend, not the dispatched
+    # transport class, so RubyLLM-served conversations keep their provider's
+    # copy and billing URL.
+    @message.content_text = api_service.key_error_message
     wrap_up_the_failed_message
     return true
   rescue Faraday::ParsingError
@@ -75,9 +82,8 @@ class GetNextAIMessageJob < ApplicationJob
     wrap_up_the_failed_message
     return true
   rescue Faraday::TooManyRequestsError
-    service = ai_backend.name.demodulize
     @message.content_text = "(I received a quota error. Try again and if you still get this error then your API key is probably valid, but you may need to adding billing details. You are using " +
-      "#{service} so go here #{ai_backend.billing_url} and add a credit card, or if you already have one review your billing plan.)"
+      "#{api_service.provider_name} so go here #{api_service.billing_url} and add a credit card, or if you already have one review your billing plan.)"
     wrap_up_the_failed_message
     return true
   rescue WaitForPrevious
@@ -163,7 +169,7 @@ class GetNextAIMessageJob < ApplicationJob
       parsed = JSON.parse(tool_message[:content]) rescue nil
 
       if parsed.is_a?(Hash) && parsed.has_key?("json_of_generated_image")
-        generated_image = GeneratedImage.new(parsed["json_of_generated_image"])
+        generated_image = GeneratedImage.new(parsed["json_of_generated_image"]) # a blank payload is skipped by attach_to!
         # Redact the large base64 payload from the saved tool message content
         parsed = parsed.except("json_of_generated_image")
       end

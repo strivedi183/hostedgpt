@@ -12,43 +12,62 @@ class AIBackend::RubyLLMTest < ActiveSupport::TestCase
     @gemini_service = api_services(:keith_gemini_service)
   end
 
-  # Phase 1 — updated for Phase 3 driver support
+  # Provider identity support
 
-  test "supports_driver? returns true for all backends in Phase 3" do
-    assert AIBackend::RubyLLM.supports_driver?("openai")
-    assert AIBackend::RubyLLM.supports_driver?("anthropic")
-    assert AIBackend::RubyLLM.supports_driver?("gemini")
+  test "supports_identity? covers every chat provider identity and nothing else" do
+    assert AIBackend::RubyLLM.supports_identity?(:openai)
+    assert AIBackend::RubyLLM.supports_identity?(:anthropic)
+    assert AIBackend::RubyLLM.supports_identity?(:gemini)
+    assert AIBackend::RubyLLM.supports_identity?(:groq)      # openai-compatible path
+    assert AIBackend::RubyLLM.supports_identity?(:openrouter) # native provider
+    refute AIBackend::RubyLLM.supports_identity?(:brave)
+    refute AIBackend::RubyLLM.supports_identity?(nil)
   end
 
-  test "APIService#ai_backend returns old OpenAI class when feature flag is off" do
+  test "APIService#ai_backend returns the identity's SDK class when the flag is off" do
     stub_features(use_ruby_llm: false) do
-      assert_equal AIBackend::OpenAI, @openai_service.ai_backend
+      assert_equal AIBackend::OpenAI, api_services(:keith_openai_service).ai_backend
+      assert_equal AIBackend::Anthropic, api_services(:keith_anthropic_service).ai_backend
+      assert_equal AIBackend::Gemini, api_services(:keith_gemini_service).ai_backend
+      assert_equal AIBackend::Groq, api_services(:keith_groq_service).ai_backend
+      assert_equal AIBackend::OpenRouter, api_services(:keith_openrouter_service).ai_backend
+      assert_nil api_services(:keith_brave_service).ai_backend
     end
   end
 
-  test "APIService#ai_backend returns old Anthropic class when feature flag is off" do
-    stub_features(use_ruby_llm: false) do
-      assert_equal AIBackend::Anthropic, @anthropic_service.ai_backend
-    end
-  end
-
-  test "APIService#ai_backend returns old Gemini class when feature flag is off" do
-    stub_features(use_ruby_llm: false) do
-      assert_equal AIBackend::Gemini, @gemini_service.ai_backend
-    end
-  end
-
-  test "APIService#ai_backend returns RubyLLM when flag on and driver is openai" do
+  test "APIService#ai_backend returns RubyLLM for every chat identity when the flag is on" do
     stub_features(use_ruby_llm: true) do
-      assert_equal AIBackend::RubyLLM, @openai_service.ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_openai_service).ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_anthropic_service).ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_gemini_service).ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_groq_service).ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_openrouter_service).ai_backend
     end
   end
 
-  test "APIService#ai_backend returns RubyLLM for all drivers when flag is on in Phase 3" do
+  test "an explicit sdk choice beats an on site default and an explicit ruby_llm choice beats an off one" do
     stub_features(use_ruby_llm: true) do
-      assert_equal AIBackend::RubyLLM, @openai_service.ai_backend
-      assert_equal AIBackend::RubyLLM, @anthropic_service.ai_backend
-      assert_equal AIBackend::RubyLLM, @gemini_service.ai_backend
+      api_services(:keith_openai_service).user.features[:openai_ai_backend] = "sdk"
+      assert_equal AIBackend::OpenAI, api_services(:keith_openai_service).reload.ai_backend
+    end
+
+    api_services(:keith_openai_service).user.features[:openai_ai_backend] = nil
+    stub_features(use_ruby_llm: false) do
+      api_services(:keith_groq_service).user.features[:groq_ai_backend] = "ruby_llm"
+      assert_equal AIBackend::RubyLLM, api_services(:keith_groq_service).reload.ai_backend
+    end
+  end
+
+  test "an explicit choice is honored per identity, not per driver" do
+    stub_features(use_ruby_llm: true) do
+      user = api_services(:keith_openai_service).user
+      user.features[:openai_ai_backend] = "sdk"
+
+      # openai rides the same driver as groq and openrouter; only the openai
+      # identity's choice should flip it back to the SDK.
+      assert_equal AIBackend::OpenAI, api_services(:keith_openai_service).reload.ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_groq_service).ai_backend
+      assert_equal AIBackend::RubyLLM, api_services(:keith_openrouter_service).ai_backend
     end
   end
 

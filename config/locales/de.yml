@@ -158,7 +158,7 @@ de:
             light: "Hell"
             system: "System"
           ai_backends: "KI-Backends"
-          ai_backends_description: "Welche Implementierung jeden Anbieter bedient. Standard folgt der globalen Einstellung (aktuell %{current}). RubyLLM wird wählbar, sobald es ausgerollt ist."
+          ai_backends_description: "Welche Implementierung jeden Anbieter bedient. Standard folgt der globalen Einstellung (aktuell %{current})."
           backend_choice_default: "Standard"
           backend_choice_ruby_llm: "RubyLLM"
           backend_choice_sdk: "Integriertes SDK"

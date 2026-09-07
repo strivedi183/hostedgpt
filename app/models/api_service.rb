@@ -61,15 +61,19 @@ class APIService < ApplicationRecord
     self.class.sdk_backends[provider_identity]
   end
 
-  # Dispatch resolves exactly as the driver-chain it replaces: the RubyLLM
-  # transport serves any driver it supports (which, riding the openai driver,
-  # includes Groq and OpenRouter rows), and everything else falls to the
-  # identity's own backend. Honoring stored choices is the next commit, not
-  # this one.
   def ai_backend
-    return AIBackend::RubyLLM if Feature.use_ruby_llm? && AIBackend::RubyLLM.supports_driver?(driver)
+    use_ruby_llm? ? AIBackend::RubyLLM : sdk_backend
+  end
 
-    sdk_backend
+  # An explicit per-identity choice ("ruby_llm" / "sdk") always wins; silent
+  # users follow the site-wide flag, gated on RubyLLM actually supporting the
+  # identity.
+  def use_ruby_llm?
+    identity = provider_identity
+    return false unless AIBackend::RubyLLM.supports_identity?(identity)
+
+    choice = user.features[:"#{identity}_ai_backend"]
+    choice.present? ? choice == "ruby_llm" : Feature.use_ruby_llm?
   end
 
   # Error facts resolve through the identity's own backend class, so a Groq

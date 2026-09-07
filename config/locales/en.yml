@@ -187,7 +187,7 @@ en:
             light: "Light"
             system: "System"
           ai_backends: "AI backends"
-          ai_backends_description: "Which implementation handles each provider. Default follows the site-wide setting (currently %{current}). RubyLLM becomes selectable as its rollout lands."
+          ai_backends_description: "Which implementation handles each provider. Default follows the site-wide setting (currently %{current})."
           backend_choice_default: "Default"
           backend_choice_ruby_llm: "RubyLLM"
           backend_choice_sdk: "Built-in SDK"
