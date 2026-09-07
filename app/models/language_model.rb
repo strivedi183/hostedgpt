@@ -29,7 +29,6 @@ class LanguageModel < ApplicationRecord
   end
 
   def logo_filename
-    return "meta_ai_logo.svg" if api_name.match?(/llama/i)
     api_service.logo_filename
   end
 
