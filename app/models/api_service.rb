@@ -48,6 +48,8 @@ class APIService < ApplicationRecord
     case url
     when URL_OPEN_AI then "openai_logo.svg"
     when URL_ANTHROPIC then "claude_logo.svg"
+    when URL_GROQ then "groq_logo.svg"
+    when URL_OPENROUTER then "openrouter_logo.png"
     when URL_GEMINI then "google_gemini_logo.svg"
     end
   end

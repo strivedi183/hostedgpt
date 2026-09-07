@@ -43,9 +43,9 @@ class APIServiceTest < ActiveSupport::TestCase
   test "logo_filename" do
     assert_equal "openai_logo.svg", api_services(:keith_openai_service).logo_filename
     assert_equal "claude_logo.svg", api_services(:keith_anthropic_service).logo_filename
+    assert_equal "groq_logo.svg", api_services(:keith_groq_service).logo_filename
+    assert_equal "openrouter_logo.png", api_services(:keith_openrouter_service).logo_filename
     assert_equal "google_gemini_logo.svg", api_services(:keith_gemini_service).logo_filename
-    assert_nil api_services(:keith_groq_service).logo_filename
-    assert_nil api_services(:keith_openrouter_service).logo_filename
     assert_nil api_services(:keith_other_service).logo_filename
   end
 
