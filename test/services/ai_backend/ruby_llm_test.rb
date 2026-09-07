@@ -7,9 +7,6 @@ class AIBackend::RubyLLMTest < ActiveSupport::TestCase
     @conversation = conversations(:attachments)
     @assistant = assistants(:keith_gpt4)
     @user = @conversation.user
-    @openai_service = api_services(:keith_openai_service)
-    @anthropic_service = api_services(:keith_anthropic_service)
-    @gemini_service = api_services(:keith_gemini_service)
   end
 
   # Provider identity support
@@ -312,12 +309,22 @@ class AIBackend::RubyLLMTest < ActiveSupport::TestCase
     assert_instance_of AIBackend::RubyLLM, backend
   end
 
-  test "ruby_llm_context sets openai_api_base for Groq" do
+  test "ruby_llm_context sets openai_api_base and the system role for Groq" do
     @assistant.language_model.api_service.update!(url: APIService::URL_GROQ, driver: "openai")
     backend = AIBackend::RubyLLM.new(@user, @assistant)
 
     context = backend.send(:ruby_llm_context)
     assert_equal APIService::URL_GROQ, context.openai_api_base
+    assert_equal true, context.openai_use_system_role # compat vendors expect system, not OpenAI's developer role
+  end
+
+  test "ruby_llm_context sets openai_api_base and the system role for OpenRouter" do
+    @assistant.language_model.api_service.update!(url: APIService::URL_OPENROUTER, driver: "openai")
+    backend = AIBackend::RubyLLM.new(@user, @assistant)
+
+    context = backend.send(:ruby_llm_context)
+    assert_equal APIService::URL_OPENROUTER, context.openai_api_base
+    assert_equal true, context.openai_use_system_role
   end
 
   test "ruby_llm_context does not set openai_api_base for canonical OpenAI URL" do
@@ -326,6 +333,19 @@ class AIBackend::RubyLLMTest < ActiveSupport::TestCase
 
     context = backend.send(:ruby_llm_context)
     assert_nil context.openai_api_base
+    assert_nil context.openai_use_system_role
+  end
+
+  test "build_chat sends OpenRouter attribution headers only for the OpenRouter identity" do
+    @assistant.language_model.api_service.update!(url: APIService::URL_OPENROUTER, driver: "openai")
+    backend = AIBackend::RubyLLM.new(@user, @assistant)
+
+    chat = backend.send(:build_chat)
+    assert_equal({ "HTTP-Referer" => Rails.application.config.x.app_url.to_s, "X-Title" => Setting.product_name.to_s }, chat.headers)
+
+    @assistant.language_model.api_service.update!(url: APIService::URL_OPEN_AI)
+    chat = backend.send(:build_chat)
+    assert_empty chat.headers
   end
 
   # Phase 3 — Anthropic + Gemini/Groq text chat

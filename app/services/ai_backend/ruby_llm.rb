@@ -16,8 +16,8 @@ class AIBackend::RubyLLM < AIBackend
   ].freeze
 
   # RubyLLM serves every chat provider identity: OpenAI, Anthropic, and Gemini
-  # natively; Groq and OpenRouter through their endpoints (Groq via the
-  # openai-compatible path, OpenRouter via its native provider). Accepts
+  # natively; Groq and OpenRouter over the openai-compatible path (the driver
+  # is :openai with openai_api_base pointed at the service URL). Accepts
   # symbols or strings; callers pass both.
   def self.supports_identity?(identity)
     identity.present? && APIService.chat_provider_identities.include?(identity.to_sym)
@@ -53,6 +53,7 @@ class AIBackend::RubyLLM < AIBackend
       context = RubyLLM.context { |c| c.public_send("#{provider}_api_key=", token) }
       if provider == :openai && url != APIService::URL_OPEN_AI
         context.openai_api_base = url
+        context.openai_use_system_role = true
       end
       chat = RubyLLM::Chat.new(model: api_name, provider: provider, assume_model_exists: true, context: context)
       chat.add_message({ role: "user", content: "Hello!" })
@@ -117,7 +118,9 @@ class AIBackend::RubyLLM < AIBackend
   end
 
   def build_chat
-    self.class.gem_class.new(model: @api_name, provider: provider_slug, assume_model_exists: true, context: ruby_llm_context)
+    chat = self.class.gem_class.new(model: @api_name, provider: provider_slug, assume_model_exists: true, context: ruby_llm_context)
+    chat.with_headers(**AIBackend::OpenRouter.attribution_headers) if @api_service.provider_identity == :openrouter
+    chat
   end
 
   def ruby_llm_context
@@ -125,6 +128,9 @@ class AIBackend::RubyLLM < AIBackend
       c.public_send("#{provider_slug}_api_key=", @token)
       if provider_slug == :openai && @api_service.url != APIService::URL_OPEN_AI
         c.openai_api_base = @api_service.url
+        # OpenAI-compat vendors (Groq, OpenRouter, custom servers) expect the
+        # traditional system role; RubyLLM defaults to OpenAI's developer role.
+        c.openai_use_system_role = true
       end
     end
   end

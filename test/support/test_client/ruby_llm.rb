@@ -1,13 +1,19 @@
 module TestClient
   class RubyLLM
     class Chat
-      attr_reader :messages
+      attr_reader :messages, :context, :headers
 
       def initialize(model:, provider: nil, assume_model_exists: nil, context: nil)
         @@model = model
         @context = context
+        @headers = {}
         @messages = []
         @last_response = nil
+      end
+
+      def with_headers(**headers)
+        @headers = headers
+        self
       end
 
       def with_instructions(instructions)
@@ -141,7 +147,8 @@ module TestClient
 
     class ContextDouble
       attr_accessor :openai_api_key, :anthropic_api_key, :gemini_api_key,
-        :openai_api_base, :anthropic_api_base, :gemini_api_base
+        :openai_api_base, :anthropic_api_base, :gemini_api_base,
+        :openai_use_system_role
     end
 
     def self.context(&block)
