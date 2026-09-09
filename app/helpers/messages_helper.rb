@@ -105,11 +105,14 @@ module MessagesHelper
   end
 
   def message_to_user_hash(message)
-    return nil if message.content_text.blank?
-    hash = JSON.parse(message.content_text)
-    hash if hash.is_a?(Hash) && hash["message_to_user"].present?
-  rescue JSON::ParserError
-    nil
+    @message_to_user_hashes ||= {}
+    @message_to_user_hashes[message.content_text] ||= begin
+      return nil if message.content_text.blank?
+      hash = JSON.parse(message.content_text)
+      hash.is_a?(Hash) && hash["message_to_user"].present? ? hash : nil
+    rescue JSON::ParserError
+      nil
+    end
   end
 
   # Tool-result deep links are https-only. Anything else (javascript:, data:,
