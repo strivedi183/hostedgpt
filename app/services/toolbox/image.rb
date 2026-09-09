@@ -5,8 +5,8 @@ class Toolbox::Image < Toolbox
   S
 
   def generate_an_image(image_generation_prompt_s:)
-    backend = Current.message&.assistant&.language_model&.api_service&.ai_backend || AIBackend
-    result = generate_with_error_context(backend, image_generation_prompt_s)
+    api_service = Current.message&.assistant&.language_model&.api_service
+    result = generate_with_error_context(api_service&.ai_backend || AIBackend, api_service, image_generation_prompt_s)
 
     {
       prompt_given: image_generation_prompt_s,
@@ -20,10 +20,10 @@ class Toolbox::Image < Toolbox
 
   # The backend raises a context-free key error because it cannot know which
   # assistant wanted the image; this tool can, so the context is appended here.
-  def generate_with_error_context(backend, prompt)
+  def generate_with_error_context(backend, api_service, prompt)
     backend.generate_image(prompt: prompt, user: Current.user)
   rescue RuntimeError => e
-    current_backend = Current.message&.assistant&.language_model&.api_service&.name || "current AI backend"
+    current_backend = api_service&.name || "current AI backend"
     raise "#{e.message} to use image generation with #{current_backend}."
   end
 end
