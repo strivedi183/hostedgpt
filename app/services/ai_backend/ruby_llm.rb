@@ -31,6 +31,17 @@ class AIBackend::RubyLLM < AIBackend
     Rails.env.test? ? ::TestClient::RubyLLM::Chat : ::AIBackend::RubyLLM::InterceptedChat
   end
 
+  # One stanza per provider credential: the key plus, for openai-compatible
+  # vendors (anything not the canonical OpenAI URL), the base URL override and
+  # the traditional system role those servers expect.
+  def self.configure_context(context, provider:, url:, token:)
+    context.public_send("#{provider}_api_key=", token)
+    if provider == :openai && url != APIService::URL_OPEN_AI
+      context.openai_api_base = url
+      context.openai_use_system_role = true
+    end
+  end
+
   def self.provider_for_url(url)
     if url&.include?("api.anthropic.com")
       :anthropic
@@ -50,11 +61,7 @@ class AIBackend::RubyLLM < AIBackend
     else
       Rails.logger.info "Connecting to AI API server at #{url} with access token of length #{token.to_s.length}"
       Rails.logger.info "Testing using model #{api_name} for provider #{provider}"
-      context = RubyLLM.context { |c| c.public_send("#{provider}_api_key=", token) }
-      if provider == :openai && url != APIService::URL_OPEN_AI
-        context.openai_api_base = url
-        context.openai_use_system_role = true
-      end
+      context = RubyLLM.context { |c| configure_context(c, provider: provider, url: url, token: token) }
       chat = RubyLLM::Chat.new(model: api_name, provider: provider, assume_model_exists: true, context: context)
       chat.add_message({ role: "user", content: "Hello!" })
       chat.complete.content
@@ -124,15 +131,7 @@ class AIBackend::RubyLLM < AIBackend
   end
 
   def ruby_llm_context
-    self.class.client.context do |c|
-      c.public_send("#{provider_slug}_api_key=", @token)
-      if provider_slug == :openai && @api_service.url != APIService::URL_OPEN_AI
-        c.openai_api_base = @api_service.url
-        # OpenAI-compat vendors (Groq, OpenRouter, custom servers) expect the
-        # traditional system role; RubyLLM defaults to OpenAI's developer role.
-        c.openai_use_system_role = true
-      end
-    end
+    self.class.client.context { |c| self.class.configure_context(c, provider: provider_slug, url: @api_service.url, token: @token) }
   end
 
   def stream_handler

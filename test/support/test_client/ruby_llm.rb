@@ -1,11 +1,10 @@
 module TestClient
   class RubyLLM
     class Chat
-      attr_reader :messages, :context, :headers
+      attr_reader :messages, :headers
 
       def initialize(model:, provider: nil, assume_model_exists: nil, context: nil)
         @@model = model
-        @context = context
         @headers = {}
         @messages = []
         @last_response = nil
