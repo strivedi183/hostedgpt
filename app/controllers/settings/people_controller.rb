@@ -44,12 +44,8 @@ class Settings::PeopleController < Settings::ApplicationController
     end
     return if updates.empty?
 
-    # One save for all choices: each []= write is a full model save, and five
-    # of those per form submit is five chances to interleave with concurrent
-    # preference writes.
     user = Current.person.reload.user   # merge against fresh state, not a stale session copy
-    feature = user.preferences[:feature] || user.preferences["feature"] || {}
-    user.update!(preferences: user.preferences.deep_merge(feature: feature.merge(updates.transform_keys(&:to_sym))))
+    User::Features.batch_merge(user, updates)
   end
 
   def check_personable_id

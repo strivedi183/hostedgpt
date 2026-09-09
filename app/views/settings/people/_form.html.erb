@@ -133,7 +133,7 @@
         </div>
         <% User::Features.derived_backend_names.each do |choice| %>
           <% backend = choice.to_s.delete_suffix("_ai_backend") %>
-          <% display_name = { "openai" => "OpenAI", "openrouter" => "OpenRouter" }.fetch(backend) { backend.humanize } %>
+          <% display_name = APIService.identity_display_name(backend) %>
           <% current_choice = Current.person.user.features[choice] %>
           <div class="flex items-center gap-8 py-1">
             <span class="w-28 dark:text-gray-400"><%= display_name %></span>

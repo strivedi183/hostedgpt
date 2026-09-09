@@ -49,6 +49,10 @@ class APIService < ApplicationRecord
     sdk_backends.keys
   end
 
+  def self.identity_display_name(identity)
+    sdk_backends[identity.to_sym]&.name&.demodulize || identity.to_s.humanize
+  end
+
   DIRECT_DRIVERS = %w[openai anthropic gemini].freeze
 
   def provider_identity
@@ -72,7 +76,7 @@ class APIService < ApplicationRecord
     identity = provider_identity
     return false unless AIBackend::RubyLLM.supports_identity?(identity)
 
-    choice = user.features[:"#{identity}_ai_backend"]
+    choice = user.features[User::Features.backend_choice_name(identity)]
     choice.present? ? choice == "ruby_llm" : Feature.use_ruby_llm?
   end
 
