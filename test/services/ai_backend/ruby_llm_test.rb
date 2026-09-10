@@ -791,6 +791,72 @@ class AIBackend::RubyLLMTest < ActiveSupport::TestCase
     end
   end
 
+  # Gemini 3 rejects a functionCall replayed without the thought signature it
+  # issued, so the signature has to survive the round trip through the database.
+
+  test "stream_next_conversation_message keeps the thought signature on a tool call" do
+    @assistant.language_model.update!(supports_tools: true)
+    message = @conversation.messages.create!(
+      role: :assistant,
+      content_text: nil,
+      assistant: @assistant,
+      index: @conversation.messages.maximum(:index).to_i + 1,
+      version: :latest
+    )
+
+    backend = AIBackend::RubyLLM.new(@user, @assistant, @conversation, message)
+    TestClient::RubyLLM::Chat.stub :function, "helloworld_hi" do
+      TestClient::RubyLLM::Chat.stub :thought_signature, "sig-abc" do
+        result = backend.stream_next_conversation_message { |c| }
+        assert_equal "sig-abc", result[0][:thought_signature]
+      end
+    end
+  end
+
+  test "stream_next_conversation_message omits the thought signature when the provider issues none" do
+    @assistant.language_model.update!(supports_tools: true)
+    message = @conversation.messages.create!(
+      role: :assistant,
+      content_text: nil,
+      assistant: @assistant,
+      index: @conversation.messages.maximum(:index).to_i + 1,
+      version: :latest
+    )
+
+    backend = AIBackend::RubyLLM.new(@user, @assistant, @conversation, message)
+    TestClient::RubyLLM::Chat.stub :function, "helloworld_hi" do
+      result = backend.stream_next_conversation_message { |c| }
+      refute_includes result[0].keys, :thought_signature
+    end
+  end
+
+  test "preceding_conversation_messages replays the stored thought signature" do
+    @assistant.language_model.update!(supports_tools: true)
+    conversation = @conversation
+
+    conversation.messages.create!(
+      role: :assistant,
+      content_text: nil,
+      assistant: @assistant,
+      content_tool_calls: [
+        { type: "function", id: "call_123", thought_signature: "sig-abc",
+          function: { name: "helloworld_hi", arguments: '{"name":"Keith"}' } },
+      ]
+    )
+    follow_up = conversation.messages.create!(
+      role: :assistant,
+      content_text: nil,
+      assistant: @assistant,
+      version: :latest
+    )
+
+    backend = AIBackend::RubyLLM.new(@user, @assistant, conversation, follow_up)
+    msgs = backend.send(:preceding_conversation_messages)
+
+    assistant_replay = msgs.find { |m| m[:role] == :assistant && m[:tool_calls].present? }
+    assert_equal "sig-abc", assistant_replay[:tool_calls]["call_123"].thought_signature
+  end
+
   test "preceding_conversation_messages replays tool calls and tool results" do
     @assistant.language_model.update!(supports_tools: true)
     conversation = @conversation

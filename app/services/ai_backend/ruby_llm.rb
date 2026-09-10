@@ -206,7 +206,9 @@ class AIBackend::RubyLLM < AIBackend
 
   # Reconstructs the stored OpenAI-shaped content_tool_calls (serialized via
   # JsonSerializer) into RubyLLM::ToolCall objects keyed by id — the shape
-  # RubyLLM expects on a replayed assistant message.
+  # RubyLLM expects on a replayed assistant message. The thought signature
+  # travels with the call because Gemini 3 rejects a functionCall replayed
+  # without the signature it issued.
   def tool_calls_hash(message)
     message.content_tool_calls.each_with_object({}) do |tc, hash|
       id = tc[:id] || tc["id"]
@@ -214,7 +216,12 @@ class AIBackend::RubyLLM < AIBackend
       args = tc.dig(:function, :arguments) || tc.dig("function", "arguments") || "{}"
       args = JSON.parse(args) if args.is_a?(String)
 
-      hash[id] = ::RubyLLM::ToolCall.new(id: id, name: name, arguments: args)
+      hash[id] = ::RubyLLM::ToolCall.new(
+        id: id,
+        name: name,
+        arguments: args,
+        thought_signature: tc[:thought_signature] || tc["thought_signature"],
+      )
     end
   end
 
@@ -265,7 +272,8 @@ class AIBackend::RubyLLM < AIBackend
   def format_tool_calls(tool_calls)
     tool_calls.values.map.with_index do |tc, i|
       { index: i, type: "function", id: tc.id,
-        function: { name: tc.name, arguments: tc.arguments.to_json } }
+        thought_signature: tc.thought_signature,
+        function: { name: tc.name, arguments: tc.arguments.to_json } }.compact
     end
   end
 

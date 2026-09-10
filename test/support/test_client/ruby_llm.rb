@@ -68,7 +68,8 @@ module TestClient
           ::RubyLLM::ToolCall.new(
             id: i.zero? ? self.class.id : "#{self.class.id}_#{i}",
             name: self.class.function,
-            arguments: JSON.parse(self.class.arguments)
+            arguments: JSON.parse(self.class.arguments),
+            thought_signature: self.class.thought_signature
           )
         end
         @messages << OpenStruct.new(role: :assistant, content: nil, tool_calls: tool_calls.to_h { |tc| [tc.id, tc] })
@@ -113,6 +114,12 @@ module TestClient
 
       def self.num_tool_calls
         1
+      end
+
+      # Gemini attaches a thought signature to each tool call; other providers
+      # issue none. Stub this to simulate Gemini.
+      def self.thought_signature
+        nil
       end
 
       def self.default_text
